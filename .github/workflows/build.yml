@@ -1,0 +1,73 @@
+name: Build Mac plugin
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get JUCE 8.0.4
+        run: git clone --depth 1 --branch 8.0.4 https://github.com/juce-framework/JUCE.git JUCE
+
+      - name: "Configure (universal: Apple Silicon + Intel)"
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DHD_TESTS=ON
+
+      - name: Build VST3, AU, standalone app and test
+        run: cmake --build build --config Release -j 4 --target Hades_VST3 Hades_AU Hades_Standalone HadesTest
+
+      - name: Run offline tests (all 100 presets)
+        run: ./build/HadesTest_artefacts/Release/HadesTest
+
+      - name: Sign (ad-hoc) and package
+        run: |
+          A=build/Hades_artefacts/Release
+          for p in "$A/VST3/HADES.vst3" "$A/AU/HADES.component" "$A/Standalone/HADES.app"; do
+            codesign --force --deep --sign - "$p"
+          done
+          mkdir -p dist/HADES
+          cp -R "$A/VST3/HADES.vst3" "$A/AU/HADES.component" "$A/Standalone/HADES.app" dist/HADES/
+          cat > "dist/HADES/Install HADES.command" <<'SH'
+          #!/bin/bash
+          # Copies HADES into your plug-in folders and clears the "downloaded from the internet" flag.
+          cd "$(dirname "$0")"
+          mkdir -p ~/Library/Audio/Plug-Ins/VST3 ~/Library/Audio/Plug-Ins/Components
+          rm -rf ~/Library/Audio/Plug-Ins/VST3/HADES.vst3 ~/Library/Audio/Plug-Ins/Components/HADES.component
+          cp -R HADES.vst3 ~/Library/Audio/Plug-Ins/VST3/
+          cp -R HADES.component ~/Library/Audio/Plug-Ins/Components/
+          xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/HADES.vst3 ~/Library/Audio/Plug-Ins/Components/HADES.component 2>/dev/null
+          killall -9 AudioComponentRegistrar 2>/dev/null
+          echo ""
+          echo "HADES installed. Open Ableton, go to Settings > Plug-Ins, and press Rescan."
+          SH
+          sed -i '' 's/^          //' "dist/HADES/Install HADES.command"
+          chmod +x "dist/HADES/Install HADES.command"
+          cd dist && ditto -c -k --keepParent HADES HADES-mac.zip
+
+      - name: Check the AU loads (auval)
+        continue-on-error: true
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R build/Hades_artefacts/Release/AU/HADES.component ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          sleep 3
+          auval -v aufx Hads Germ
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HADES-mac
+          path: dist/HADES-mac.zip
+
+      - name: Publish download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v0.1.${{ github.run_number }}"
+          gh release create "$TAG" dist/HADES-mac.zip --title "HADES $TAG" --notes "Download HADES-mac.zip below, unzip it, then right-click 'Install HADES.command' and choose Open."

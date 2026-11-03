@@ -1,0 +1,4 @@
+build/
+JUCE/
+*.png
+.DS_Store
